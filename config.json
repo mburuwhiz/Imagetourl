@@ -1,8 +1,10 @@
 {
-  "channel": "YourChannel",
+  "channel": "whiz_t",
   "banned": [],
   "stats": {
     "requests": 0,
     "users": {}
-  }
+  },
+  "referrals": {},
+  "recoveryTokens": {}
 }
