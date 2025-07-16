@@ -1,0 +1,22 @@
+{
+  "name": "telegram-telegraph-bot",
+  "version": "1.0.0",
+  "description": "A Telegram bot that uploads images to Telegra.ph and returns shareable links, with forced‑subscribe and advanced admin controls.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "author": "WHIZ",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.4.0",
+    "dotenv": "^16.0.3",
+    "form-data": "^4.0.0",
+    "lru-cache": "^10.0.0",
+    "telegraf": "^4.14.2"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.20"
+  }
+}
