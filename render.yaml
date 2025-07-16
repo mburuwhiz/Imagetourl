@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: imagetourlbot
+    env: node
+    repo: https://github.com/mburuwhiz/Imagetourl
+    branch: main
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: BOT_USERNAME
+        sync: false
+      - key: FORCE_SUB_CHANNEL
+        sync: false
