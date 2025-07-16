@@ -1,33 +1,22 @@
 {
   "name": "imagetourlbot",
   "version": "1.0.0",
-  "description": "Powerful Telegram bot to convert images to Telegraph links with advanced features.",
+  "description": "Telegram bot to convert images to Telegra.ph links with advanced scheduling & admin",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.14.2",
+    "axios": "^1.6.0",
+    "form-data": "^4.0.0",
+    "node-schedule": "^2.1.1",
+    "lru-cache": "^10.0.0",
+    "dotenv": "^16.3.1"
   },
   "engines": {
     "node": ">=18 <21"
   },
-  "dependencies": {
-    "axios": "^1.6.0",
-    "dotenv": "^16.3.1",
-    "form-data": "^4.0.0",
-    "lru-cache": "^10.0.0",
-    "node-schedule": "^2.1.0",
-    "telegraf": "^4.12.3"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.2"
-  },
-  "keywords": [
-    "telegram-bot",
-    "image-upload",
-    "telegraph",
-    "telegraf",
-    "whiz"
-  ],
   "author": "WHIZ",
   "license": "MIT"
 }
