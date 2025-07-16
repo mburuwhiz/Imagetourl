@@ -304,3 +304,14 @@ bot.command('redeem', ctx => {
 // ─── ERROR & LAUNCH ─────────────────────────────────────────────────────────
 bot.catch(err => console.error('BOT ERR', err));
 bot.launch().then(()=>console.log('🤖 Bot started'));
+
+// ─── DUMMY SERVER TO PLEASE RENDER ────────────────
+const http = require('http');
+const PORT = process.env.PORT || 3000;
+
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end('🤖 Bot is running.');
+}).listen(PORT, () => {
+  console.log(`✅ Dummy server listening on ${PORT}`);
+});
