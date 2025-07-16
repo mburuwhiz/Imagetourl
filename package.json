@@ -1,7 +1,7 @@
 {
   "name": "telegram-telegraph-bot",
   "version": "1.0.0",
-  "description": "A Telegram bot that uploads images to Telegra.ph and returns shareable links, with forced‑subscribe and advanced admin controls.",
+  "description": "A menu‑driven Telegram bot that converts images to Telegra.ph links with preview, scheduling, inline‑mode and healthchecks",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -14,6 +14,7 @@
     "dotenv": "^16.0.3",
     "form-data": "^4.0.0",
     "lru-cache": "^10.0.0",
+    "node-schedule": "^2.1.1",
     "telegraf": "^4.14.2"
   },
   "devDependencies": {
