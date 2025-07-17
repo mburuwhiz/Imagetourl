@@ -1,253 +1,253 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
-const axios = require('axios');
-const FormData = require('form-data');
-const schedule = require('node-schedule');
-const sharp = require('sharp');
 const fs = require('fs');
 const path = require('path');
+const axios = require('axios');
+const FormData = require('form-data');
+const sharp = require('sharp');
+const schedule = require('node-schedule');
+const express = require('express');
 const { LRUCache } = require('lru-cache');
-const http = require('http');
 
-// ─── CONFIG ─────────────────────────────
+// ─── CONFIG ───────────────────────────────────────────────────────────────
 const CONFIG_PATH = path.join(__dirname, 'config.json');
+const defaultConfig = {
+  channel: process.env.FORCE_SUB_CHANNEL.replace(/^@/, ''),
+  banned: [],
+  stats: { requests: 0, users: {} },
+  referrals: {},
+  recoveryTokens: {},
+  uploads: {}
+};
 let config = fs.existsSync(CONFIG_PATH)
   ? JSON.parse(fs.readFileSync(CONFIG_PATH))
-  : {
-      channel: process.env.FORCE_SUB_CHANNEL.replace(/^@/, ''),
-      banned: [],
-      stats: { requests: 0, users: {} },
-      referrals: {},
-      recoveryTokens: {},
-      uploads: {},
-    };
+  : defaultConfig;
 function saveConfig() {
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
 }
 
-// ─── ENV ────────────────────────────────
+// ─── ENV & CACHING ──────────────────────────────────────────────────────────
 const bot = new Telegraf(process.env.BOT_TOKEN);
-const ADMIN_ID = +process.env.ADMIN_ID;
-const BOT_USERNAME = process.env.BOT_USERNAME;
+const ADMIN_ID = Number(process.env.ADMIN_ID);
+const CHANNEL = config.channel;
 const IS_FREE_MODE = process.env.IS_FREE_MODE === 'true';
-const memberCache = new LRUCache({ max: 500, ttl: 1000 * 60 * 5 });
+const memberCache = new LRUCache({ max: 500, ttl: 5 * 60 * 1000 });
 
-// ─── UTIL ───────────────────────────────
-function log(action, ctx) {
-  console.log(`[${new Date().toISOString()}] ${action} by ${ctx.from.username || ctx.from.id}`);
-}
-
+// ─── HELPERS ───────────────────────────────────────────────────────────────
 async function ensureSubscribed(ctx) {
+  if (ctx.from.id === ADMIN_ID || IS_FREE_MODE) return true;
   const uid = ctx.from.id;
   if (config.banned.includes(uid)) {
     await ctx.reply('🚫 You are banned.');
     return false;
   }
-
   if (!memberCache.has(uid)) {
     try {
-      const member = await ctx.telegram.getChatMember(`@${config.channel}`, uid);
-      const ok = ['member', 'creator', 'administrator'].includes(member.status);
-      if (!ok) throw 0;
+      const m = await ctx.telegram.getChatMember(`@${CHANNEL}`, uid);
+      if (!['member','administrator','creator'].includes(m.status)) throw 0;
       memberCache.set(uid, true);
     } catch {
-      return ctx.replyWithHTML(
-        `🔒 Please <b>join @${config.channel}</b> to use this bot`,
+      await ctx.replyWithHTML(
+        `🔒 Please join <b>@${CHANNEL}</b> first.`,
         Markup.inlineKeyboard([
-          [Markup.button.url('➡️ Join Channel', `https://t.me/${config.channel}`)],
-          [Markup.button.callback('🔄 I Joined', 'CHECK_JOIN')],
+          [ Markup.button.url('➡️ Join Channel', `https://t.me/${CHANNEL}`) ],
+          [ Markup.button.callback('🔄 I Joined', 'CHECK_JOIN') ]
         ])
       );
+      return false;
     }
   }
-
   return true;
 }
 
-// ─── BOT START ──────────────────────────
+function formatBytes(bytes) {
+  if (!bytes) return '0 Bytes';
+  const k = 1024, sizes = ['Bytes','KB','MB'];
+  const i = Math.floor(Math.log(bytes)/Math.log(k));
+  return parseFloat((bytes/Math.pow(k,i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+// ─── BOT FLOW ──────────────────────────────────────────────────────────────
+const pending = {};
+const scheduledJobs = {};
+
+// /start with referral
 bot.start(ctx => {
-  const ref = (ctx.startPayload || '').replace(/^ref_/, '');
-  if (ref && ref !== String(ctx.from.id)) {
-    config.referrals[ref] = (config.referrals[ref] || 0) + 1;
+  const payload = (ctx.startPayload||'').replace(/^ref_/, '');
+  if (payload && payload !== String(ctx.from.id)) {
+    config.referrals[payload] = (config.referrals[payload]||0) + 1;
     saveConfig();
   }
-  ctx.reply(`👋 Welcome, ${ctx.from.first_name}!\nUse /menu to begin.`);
+  ctx.reply(`👋 Hello ${ctx.from.first_name}! Use /menu to begin.`);
 });
 
-// ─── MENU ───────────────────────────────
+// /menu
 bot.command('menu', ctx => {
-  const buttons = [
-    [Markup.button.callback('📤 Upload Image', 'UPLOAD')],
-    [Markup.button.callback('🔍 Check Link', 'HEALTH')],
-    [Markup.button.callback('🕓 Schedule Upload', 'SCHEDULE')],
+  const k = [
+    [ Markup.button.callback('📤 Upload Image', 'UPLOAD') ],
+    [ Markup.button.callback('🔍 Check Link',   'HEALTH') ],
+    [ Markup.button.callback('🕓 Schedule',     'SCHEDULE') ]
   ];
-  if (ctx.from.id === ADMIN_ID) {
-    buttons.push([Markup.button.callback('🛠 Admin Panel', 'ADMIN')]);
-  }
-  ctx.reply('📋 Menu', Markup.inlineKeyboard(buttons));
+  if (ctx.from.id === ADMIN_ID) k.push([ Markup.button.callback('🛠 Admin', 'ADMIN') ]);
+  ctx.reply('📋 Main Menu', Markup.inlineKeyboard(k));
 });
 
-// ─── IMAGE FLOW ─────────────────────────
-const pending = {};
-bot.action('UPLOAD', ctx =>
-  ctx.editMessageText('📤 Send an image.', Markup.inlineKeyboard([[Markup.button.callback('🔙 Back', 'menu')]]))
-);
+// Join refresh
+bot.action('CHECK_JOIN', async ctx => {
+  if (await ensureSubscribed(ctx)) ctx.reply('✅ Joined! Use /menu');
+});
 
+// Inline healthchecker
+bot.inlineQuery(async ({ inlineQuery, answerInlineQuery }) => {
+  const q = inlineQuery.query.trim();
+  if (!q.startsWith('https://telegra.ph/file/')) return answerInlineQuery([], {
+    switch_pm_text: 'Use /menu',
+    switch_pm_parameter: 'start'
+  });
+  try {
+    const ok = (await axios.head(q)).status === 200;
+    return answerInlineQuery([{
+      type: 'article', id: 'hc',
+      title: ok?'🟢 OK':'🔴 Broken',
+      input_message_content: { message_text: `${ok?'✔️':'❌'} ${q}` },
+      description: ok?'Link valid':'Link broken'
+    }]);
+  } catch {
+    return answerInlineQuery([{
+      type: 'article', id: 'hc2',
+      title: '🔴 Broken',
+      input_message_content: { message_text: `❌ ${q}` },
+      description: 'Cannot fetch link'
+    }]);
+  }
+});
+
+// HEALTH menu
+bot.action('HEALTH', ctx => {
+  ctx.editMessageText('🔍 Send a https://telegra.ph/file/... link to check.', {
+    reply_markup: Markup.inlineKeyboard([[ Markup.button.callback('🔙 Back','menu') ]])
+  });
+});
+
+// SCHEDULE menu
+bot.action('SCHEDULE', ctx => {
+  const jobs = (scheduledJobs[ctx.from.id]||[]).map(j=>j.nextInvocation().toLocaleString()).join('\n')||'None';
+  ctx.editMessageText(`🕓 Your schedules:\n${jobs}`, {
+    reply_markup: Markup.inlineKeyboard([
+      [ Markup.button.callback('📤 New Upload','UPLOAD') ],
+      [ Markup.button.callback('🔙 Back','menu') ]
+    ])
+  });
+});
+
+// UPLOAD start
+bot.action('UPLOAD', ctx => {
+  ctx.editMessageText('📤 Send me an image to upload.', {
+    reply_markup: Markup.inlineKeyboard([[ Markup.button.callback('🔙 Back','menu') ]])
+  });
+});
+
+// PHOTO handler
 bot.on('photo', async ctx => {
   if (!await ensureSubscribed(ctx)) return;
-  const img = ctx.message.photo.pop();
-  const fileInfo = await ctx.telegram.getFile(img.file_id);
-  const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${fileInfo.file_path}`;
+  const p = ctx.message.photo.slice(-1)[0];
+  const f = await ctx.telegram.getFile(p.file_id);
+  const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${f.file_path}`;
 
-  const outputPath = `./compressed_${Date.now()}.jpg`;
-  const res = await axios.get(fileUrl, { responseType: 'arraybuffer' });
-  await sharp(res.data).resize(1280, 1280, { fit: 'inside' }).jpeg().toFile(outputPath);
+  // download & compress
+  const tmp = path.join(__dirname, `tmp_${ctx.from.id}_${Date.now()}.jpg`);
+  const resp = await axios.get(fileUrl, { responseType:'arraybuffer' });
+  fs.writeFileSync(tmp, resp.data);
+  const cmp = tmp.replace('.jpg','_c.jpg');
+  await sharp(tmp).resize(1280,1280,{fit:'inside'}).jpeg({quality:80}).toFile(cmp);
+  fs.unlinkSync(tmp);
 
-  pending[ctx.from.id] = { path: outputPath };
+  const stat = fs.statSync(cmp);
+  const meta = await sharp(cmp).metadata();
+  pending[ctx.from.id] = { path: cmp };
 
-  await ctx.replyWithPhoto({ source: outputPath }, {
-    caption: `📏 1280×1280px • jpeg`,
+  await ctx.replyWithPhoto({ source: cmp }, {
+    caption: `🖼️ Image ready to upload\n📏 ${meta.width}×${meta.height}px • ${formatBytes(stat.size)}`,
     reply_markup: Markup.inlineKeyboard([
-      [Markup.button.callback('✅ Confirm', 'CONFIRM')],
-      [Markup.button.callback('❌ Cancel', 'CANCEL')],
-    ]),
+      [ Markup.button.callback('✅ Confirm','CONFIRM') ],
+      [ Markup.button.callback('❌ Cancel','CANCEL') ]
+    ])
   });
 });
 
+// CANCEL
 bot.action('CANCEL', async ctx => {
+  const f = pending[ctx.from.id];
+  if (f && fs.existsSync(f.path)) fs.unlinkSync(f.path);
   delete pending[ctx.from.id];
   await ctx.deleteMessage();
-  ctx.reply('❌ Cancelled.', Markup.inlineKeyboard([[Markup.button.callback('🔙 Back', 'menu')]]));
+  ctx.reply('❌ Upload canceled.', Markup.inlineKeyboard([[ Markup.button.callback('🔙 Back','menu') ]]));
 });
 
+// CONFIRM uploads immediately
 bot.action('CONFIRM', async ctx => {
-  await ctx.editMessageCaption({
-    caption: '✅ Confirmed. Choose action:',
-    reply_markup: Markup.inlineKeyboard([
-      [Markup.button.callback('🚀 Upload Now', 'UPLOAD_NOW')],
-      [Markup.button.callback('🕓 Schedule', 'SCHEDULE')],
-    ]),
-  });
-});
-
-bot.action('UPLOAD_NOW', async ctx => {
   const file = pending[ctx.from.id];
-  if (!file) return ctx.reply('⚠️ Nothing to upload.');
-  const form = new FormData();
-  form.append('file', fs.createReadStream(file.path));
+  if (!file) return ctx.reply('⚠️ No image found.');
+
   try {
+    const form = new FormData();
+    form.append('file', fs.createReadStream(file.path));
     const res = await axios.post('https://telegra.ph/upload', form, { headers: form.getHeaders() });
     const link = 'https://telegra.ph' + res.data[0].src;
-    config.uploads[ctx.from.id] = (config.uploads[ctx.from.id] || []).concat(link);
+
+    // record
+    config.uploads[ctx.from.id] = (config.uploads[ctx.from.id]||[]).concat(link);
     config.stats.requests++;
     saveConfig();
-    await ctx.reply(`✅ Uploaded: ${link}`, Markup.inlineKeyboard([
-      [Markup.button.url('🌐 View', link)],
-      [Markup.button.callback('🔙 Back', 'menu')],
-    ]));
-  } catch {
-    await ctx.reply('❌ Upload failed.');
+
+    await ctx.editMessageCaption({
+      caption: `✅ <b>Uploaded Successfully</b>\n🔗 <a href="${link}">${link}</a>`,
+      parse_mode:'HTML',
+      reply_markup: Markup.inlineKeyboard([
+        [ Markup.button.url('🌐 View', link) ],
+        [ Markup.button.callback('🔙 Back','menu') ]
+      ])
+    });
+  } catch (err) {
+    console.error('Upload error:', err);
+    await ctx.reply('❌ Upload failed. Please try again.');
   } finally {
     fs.unlinkSync(file.path);
     delete pending[ctx.from.id];
   }
 });
 
-bot.action('SCHEDULE', async ctx => {
-  ctx.reply('📅 Send datetime as `YYYY-MM-DD HH:mm` (24h format):', {
-    reply_markup: Markup.inlineKeyboard([[Markup.button.callback('🔙 Cancel', 'menu')]]),
-  });
-
-  bot.once('text', async tctx => {
-    const when = new Date(tctx.message.text.replace(' ', 'T'));
-    if (isNaN(when)) return tctx.reply('❌ Invalid datetime format.');
-
-    const file = pending[tctx.from.id];
-    if (!file) return tctx.reply('⚠️ Nothing to schedule.');
-
-    schedule.scheduleJob(when, async () => {
-      const form = new FormData();
-      form.append('file', fs.createReadStream(file.path));
-      try {
-        const res = await axios.post('https://telegra.ph/upload', form, { headers: form.getHeaders() });
-        const link = 'https://telegra.ph' + res.data[0].src;
-        config.uploads[tctx.from.id] = (config.uploads[tctx.from.id] || []).concat(link);
-        config.stats.requests++;
-        saveConfig();
-        await tctx.telegram.sendMessage(tctx.chat.id, `✅ Scheduled Upload Done: ${link}`);
-      } catch {
-        await tctx.telegram.sendMessage(tctx.chat.id, '❌ Upload failed.');
-      } finally {
-        fs.unlinkSync(file.path);
-        delete pending[tctx.from.id];
-      }
-    });
-
-    await tctx.reply(`⏰ Scheduled for ${when.toLocaleString()}`);
-  });
-});
-
-// ─── INLINE HEALTH CHECK ────────────────
-bot.inlineQuery(async ({ inlineQuery, answerInlineQuery }) => {
-  const url = inlineQuery.query.trim();
-  if (!url.startsWith('https://telegra.ph/file/')) return answerInlineQuery([], {
-    switch_pm_text: 'Start using bot',
-    switch_pm_parameter: 'start',
-  });
-
-  try {
-    const ok = (await axios.head(url)).status === 200;
-    return answerInlineQuery([{
-      type: 'article',
-      id: 'health',
-      title: ok ? '🟢 Link OK' : '🔴 Broken Link',
-      input_message_content: { message_text: `${ok ? '✔️' : '❌'} ${url}` },
-      description: ok ? 'Telegra.ph link is valid' : 'Link seems broken',
-      thumb_url: url,
-    }]);
-  } catch {
-    return answerInlineQuery([{
-      type: 'article',
-      id: 'fail',
-      title: '🔴 Invalid Link',
-      input_message_content: { message_text: `❌ ${url}` },
-      description: 'Could not fetch this link',
-    }]);
+// SCHEDULE on text after scheduling prompt
+bot.on('text', async ctx => {
+  const txt = ctx.message.text.trim();
+  // if a schedule prompt is active
+  if (ctx._updateSubTypes && ctx._updateSubTypes[0] === 'text' && scheduledJobs[ctx.from.id] === undefined) {
+    // no scheduling context, ignore
+    return;
   }
 });
 
-// ─── ADMIN PANEL ────────────────────────
+// ADMIN panel
 bot.action('ADMIN', ctx => {
   if (ctx.from.id !== ADMIN_ID) return;
-  ctx.reply('🛠 Admin Tools', Markup.inlineKeyboard([
-    [Markup.button.callback('📊 Stats', 'STATS')],
-    [Markup.button.callback('🚫 Banlist', 'BANS')],
-    [Markup.button.callback('🎁 Referrals', 'REFS')],
-    [Markup.button.callback('🔙 Back', 'menu')],
+  ctx.editMessageText('🛠 Admin Panel', Markup.inlineKeyboard([
+    [ Markup.button.callback('📊 Stats','ASTATS') ],
+    [ Markup.button.callback('🚫 Bans','ABANS') ],
+    [ Markup.button.callback('🎁 Refs','AREFS') ],
+    [ Markup.button.callback('🔙 Back','menu') ]
   ]));
 });
-
-bot.action('STATS', ctx => {
-  const users = Object.keys(config.stats.users).length;
-  ctx.reply(`📊 Total Uploads: ${config.stats.requests}\n👤 Unique Users: ${users}`);
+bot.action('ASTATS', ctx => {
+  ctx.reply(`📊 Total: ${config.stats.requests}\n👥 Users: ${Object.keys(config.stats.users).length}`);
+});
+bot.action('ABANS', ctx => ctx.reply(`🚫 Banned:\n${config.banned.join(', ')||'None'}`));
+bot.action('AREFS', ctx => {
+  const lines = Object.entries(config.referrals).map(([u,c])=>`${u}: ${c}`);
+  ctx.reply(`🎁 Referrals:\n${lines.join('\n')||'None'}`);
 });
 
-bot.action('BANS', ctx => {
-  ctx.reply(`🚫 Banned Users:\n${config.banned.join(', ') || 'None'}`);
-});
+// Dummy server for Render health
+http.createServer((_,res) => res.end('Bot is alive')).listen(process.env.PORT||10000);
 
-bot.action('REFS', ctx => {
-  const refs = Object.entries(config.referrals).map(([id, count]) => `${id}: ${count}`).join('\n') || 'None';
-  ctx.reply(`🎁 Referrals:\n${refs}`);
-});
-
-// ─── SERVER ─────────────────────────────
-const PORT = process.env.PORT || 10000;
-http.createServer((_, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('🤖 Bot is alive.');
-}).listen(PORT, () => console.log(`✅ HTTP server on port ${PORT}`));
-
-// ─── LAUNCH ─────────────────────────────
-bot.catch(err => console.error('BOT ERROR:', err));
-bot.launch().then(() => console.log('🚀 Bot launched'));
+// Launch
+bot.launch().then(()=>console.log('🤖 Bot started')).catch(console.error);
