@@ -24,13 +24,13 @@ function saveConfig() {
 }
 
 // ─── ENV & STATE ───────────────────────────────────────────────────────────
-const bot        = new Telegraf(process.env.BOT_TOKEN);
-const ADMIN_ID   = Number(process.env.ADMIN_ID);
-const CHANNEL    = config.channel;
-const BOT_NAME   = process.env.BOT_USERNAME; // without @
-const IS_FREE    = process.env.IS_FREE_MODE === 'true';
-const pending    = {};  // userId → { path }
-const cacheTTL   = 5 * 60 * 1000;
+const bot      = new Telegraf(process.env.BOT_TOKEN);
+const ADMIN_ID = Number(process.env.ADMIN_ID);
+const CHANNEL  = config.channel;
+const BOT_NAME = process.env.BOT_USERNAME; // without @
+const IS_FREE  = process.env.IS_FREE_MODE === 'true';
+const pending  = {};  // userId → { path }
+const cacheTTL = 5 * 60 * 1000;
 const memberCache = new Map();
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────
@@ -161,16 +161,41 @@ bot.action('CANCEL', async ctx => {
   ctx.reply('❌ Upload canceled.', Markup.inlineKeyboard([[ Markup.button.callback('🔙 Back','MENU') ]]));
 });
 
+// ─── UPDATED CONFIRM HANDLER ───────────────────────────────────────────────
 bot.action('CONFIRM', async ctx => {
   const file = pending[ctx.from.id];
   if (!file) return ctx.reply('⚠️ No image found.');
 
   try {
-    const form = new FormData();
-    form.append('file', fs.createReadStream(file.path));
-    const res = await axios.post('https://telegra.ph/upload', form, { headers: form.getHeaders() });
-    const link = 'https://telegra.ph' + res.data[0].src;
+    // Read entire file into buffer
+    const buffer = fs.readFileSync(file.path);
 
+    // Prepare FormData with known length
+    const form = new FormData();
+    form.append('file', buffer, {
+      filename: 'image.jpg',
+      contentType: 'image/jpeg',
+      knownLength: buffer.length
+    });
+
+    // Compute Content-Length
+    const length = await new Promise((res, rej) =>
+      form.getLength((err, len) => err ? rej(err) : res(len))
+    );
+    const headers = { ...form.getHeaders(), 'Content-Length': length };
+
+    // Upload
+    const uploadRes = await axios.post('https://telegra.ph/upload', form, {
+      headers,
+      timeout: 20000
+    });
+
+    if (!uploadRes.data[0]?.src) {
+      throw new Error('Invalid response: ' + JSON.stringify(uploadRes.data));
+    }
+    const link = 'https://telegra.ph' + uploadRes.data[0].src;
+
+    // Record & reply
     config.uploads[ctx.from.id] = (config.uploads[ctx.from.id]||[]).concat(link);
     config.stats.requests++;
     saveConfig();
@@ -185,8 +210,8 @@ bot.action('CONFIRM', async ctx => {
       ])
     );
   } catch (err) {
-    console.error('Upload error:', err);
-    ctx.reply('❌ Upload failed. Try again later.');
+    console.error('Upload error:', err.response?.status, err.response?.data || err.message);
+    await ctx.reply('❌ Upload failed. Try again later.');
   } finally {
     fs.unlinkSync(file.path);
     delete pending[ctx.from.id];
@@ -217,4 +242,4 @@ http.createServer((_,res) => {
 
 // Launch bot
 bot.catch(e => console.error(e));
-bot.launch().then(()=>console.log('🤖 Bot started')).catch(console.error);
+bot.launch().then(()=>console.log('Hurrey 🤖 Bot started')).catch(console.error);
